@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use crate::utils::ssim_parser::{CarrierRecord, FlightLegRecord, SegmentRecords};
 use polars::prelude::*;
 use rayon::prelude::*;
@@ -134,6 +135,26 @@ fn build_segment_dataframe(segments: &[SegmentRecords<'_>]) -> PolarsResult<Data
     )
 }
 
+/// Strip leading/trailing whitespace from all String columns in a DataFrame.
+/// SSIM is a fixed-width format where fields are padded with spaces;
+/// this removes that padding efficiently at the column level.
+fn strip_string_columns(df: DataFrame) -> PolarsResult<DataFrame> {
+    let columns: PolarsResult<Vec<Column>> = df
+        .get_columns()
+        .iter()
+        .map(|column| {
+            if column.dtype() == &DataType::String {
+                let ca = column.str()?;
+                Ok(ca.apply_values(|s| Cow::Borrowed(s.trim())).into_column())
+            } else {
+                Ok(column.clone())
+            }
+        })
+        .collect();
+
+    DataFrame::new(columns?)
+}
+
 pub fn convert_to_dataframes(
     carrier: Option<&CarrierRecord>,
     flights: Vec<FlightLegRecord<'_>>,
@@ -146,6 +167,17 @@ pub fn convert_to_dataframes(
             rayon::join(
                 || build_flight_dataframe(&flights),
                 || build_segment_dataframe(&segments),
+            )
+        },
+    );
+
+    // Strip whitespace padding from all string columns
+    let (carrier_df, (flight_df, segment_df)) = rayon::join(
+        || strip_string_columns(carrier_df?),
+        || {
+            rayon::join(
+                || strip_string_columns(flight_df?),
+                || strip_string_columns(segment_df?),
             )
         },
     );
